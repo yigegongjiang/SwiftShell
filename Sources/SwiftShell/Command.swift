@@ -10,15 +10,6 @@ import Foundation
 
 // MARK: exit
 
-/**
- Prints message to standard error and terminates the application.
-
- In debug builds it precedes the message with filename and line number.
-
- - parameter errormessage: the error message.
- - parameter errorcode: exit code for the entire program. Defaults to 1.
- - returns: Never.
- */
 public func exit<T>(errormessage: T, errorcode: Int = 1, file: String = #file, line: Int = #line) -> Never {
 	#if DEBUG
 	main.stderror.print(file + ":\(line):", errormessage)
@@ -28,12 +19,6 @@ public func exit<T>(errormessage: T, errorcode: Int = 1, file: String = #file, l
 	exit(Int32(errorcode))
 }
 
-/**
- Prints error to standard error and terminates the application.
-
- - parameter error: the error
- - returns: Never.
- */
 public func exit(_ error: Error, file: String = #file, line: Int = #line) -> Never {
 	if let commanderror = error as? CommandError {
 		exit(errormessage: commanderror, errorcode: commanderror.errorcode, file: file, line: line)
@@ -44,7 +29,16 @@ public func exit(_ error: Error, file: String = #file, line: Int = #line) -> Nev
 
 // MARK: CommandRunning
 
-/// Can run commands.
+/*
+ 任何实现了该协议的对象，均可调用 `runxxx` 等命令以执行终端命令。
+ 
+ 该协议唯一的要求，即上下文。上下文中指定了当前命令执行的输入输出文件 FileHandle。
+ 对于上下文的描述，相见 `Context.swift` 文件顶部说明。
+ 
+ 可以认为，只要一个对象能够提供 Context 上下文，即可调用 `runxxx` 来执行终端命令。
+ 这样的设计，可以将命令 api 的调用设计的更加通用，不在仅仅局限于特定场景。
+ 同时，也可以非常方便形成管道式的链式调用。如：a.runxxx().runxxx()
+ */
 public protocol CommandRunning {
 	var context: Context { get }
 }
@@ -55,10 +49,12 @@ extension CommandRunning where Self: Context {
 
 extension CommandRunning {
 	func createProcess(_ executable: String, args: [String]) -> Process {
-		/**
-		 If `executable` is not a path and a path for an executable file of that name can be found, return that path.
-		 Otherwise just return `executable`.
-		 */
+    /*
+     这里是一个巧妙的设计。对于 Process 而言，具体待执行的命令一直都具有平台通用性限制。
+     在 Linux/Win 等不同系统上，用户可能将系统命令或者自定义命令放置于不同的位置。从而不能准确找到命令 path。
+     
+     作者这里通过自举的方式，在执行命令之前先准确找到命令 path，避免了多平台兼容性。
+     */
 		func path(for executable: String) -> String {
 			guard !executable.contains("/") else {
 				return executable
@@ -75,13 +71,18 @@ extension CommandRunning {
 			process.launchPath = path(for: executable)
 		}
 
-		process.environment = context.env
+    // 这里用于将父进程的环境变量信息，携带到子进程供其使用。具体可参考：[Shell 和进程](https://www.yigegongjiang.com/2022/Shell%E5%92%8C%E8%BF%9B%E7%A8%8B/#0x03-Shell-%E5%92%8C-SubShell)
+    process.environment = context.env
 		if #available(OSX 10.13, *) {
 			process.currentDirectoryURL = URL(fileURLWithPath: context.currentdirectory, isDirectory: true)
 		} else {
 			process.currentDirectoryPath = context.currentdirectory
 		}
 
+    /*
+     这里是命令执行过程中跨进程通信实现的第一步，即注入 filehandle。
+     通过 filehandle 对待执行命令提供输入参数，并获取输出信息。
+     */
 		process.standardInput = context.stdin.filehandle
 		process.standardOutput = context.stdout.filehandle
 		process.standardError = context.stderror.filehandle
@@ -92,15 +93,10 @@ extension CommandRunning {
 
 // MARK: CommandError
 
-/** Error type for commands. */
 public enum CommandError: Error, Equatable {
-	/** Exit code was not zero. */
 	case returnedErrorCode(command: String, errorcode: Int)
-
-	/** Command could not be executed. */
 	case inAccessibleExecutable(path: String)
 
-	/** Exit code for this error. */
 	public var errorcode: Int {
 		switch self {
 		case let .returnedErrorCode(_, code):
@@ -124,7 +120,11 @@ extension CommandError: CustomStringConvertible {
 
 // MARK: run
 
-/// Output from a `run` command.
+/*
+ 专门为 run 命令接口设计。(共 4 个，run/runAsync/runAndPrint/runAsyncAndPrint)
+ 
+ 因为 run 命令是非异步的，所以需要同步执行完毕后，将执行过程产生的信息进行封装，并返回给调用者。
+ */
 public final class RunOutput {
 	private let output: AsyncCommand
 	private let rawStdout: Data
@@ -141,6 +141,11 @@ public final class RunOutput {
 		var stderror = Data()
 		let group = DispatchGroup()
 
+    /*
+     因为不在走 main/custom 上下文的输出（大概率是显示器输出），run 命令需要通过 `AsyncCommand` 对象改写 Process 的输出 filehandle
+     
+     这里在命令执行完毕后，通过 filehandle 读取命令输出结果。并进行适当的数据组装，以供业务消费。
+     */
 		do {
 			// launch and read stdout and stderror.
 			// see https://github.com/kareman/SwiftShell/issues/52
@@ -198,18 +203,16 @@ public final class RunOutput {
 	/// Checks if the exit code is 0.
 	public var succeeded: Bool { exitcode == 0 }
 
-	/// Runs the first command, then the second one only if the first succeeded.
-	///
-	/// - Returns: the result of the second one if it was run, otherwise the first one.
+  /*
+   这里非常巧妙的定义了 && 和 || 符号重定义，以符合 bash 中的使用场景。并且支持 `上一个执行成功后下一个才能执行` 这样的设定。
+   实际上，因为 `CommandRunning` 可以让各种数据类型遵守，已经很方便链式使用了。
+   这里主要是为了符合 bash 使用习惯。
+   */
 	@discardableResult
 	public static func && (lhs: RunOutput, rhs: @autoclosure () -> RunOutput) -> RunOutput {
 		guard lhs.succeeded else { return lhs }
 		return rhs()
 	}
-
-	/// Runs the first command, then the second one only if the first failed.
-	///
-	/// - Returns: the result of the second one if it was run, otherwise the first one.
 	@discardableResult
 	public static func || (lhs: RunOutput, rhs: @autoclosure () -> RunOutput) -> RunOutput {
 		if lhs.succeeded { return lhs }
@@ -223,11 +226,12 @@ extension CommandRunning {
 		fatalError()
 	}
 
-	/// Runs a command.
-	///
-	/// - parameter executable: path to an executable, or the name of an executable in PATH.
-	/// - parameter args: the arguments, one string for each.
-	/// - parameter combineOutput: if true then stdout and stderror go to the same stream. Default is false.
+  /*
+   4 个命令执行接口中的 run。（run/runAsync/runAndPrint/runAsyncAndPrint）
+   
+   1. 不需要打印。不能使用 main 默认上下文(默认屏幕输出)。
+   2. 非异步，需要等当前命令执行完毕后，进一步封装命令的执行信息(状态、结果)并提供给调用者。
+   */
 	@discardableResult public func run(_ executable: String, _ args: Any ..., combineOutput: Bool = false) -> RunOutput {
 		let stringargs = args.flatten().map(String.init(describing:))
 		let asyncCommand = AsyncCommand(unlaunched: createProcess(executable, args: stringargs), combineOutput: combineOutput)
@@ -237,7 +241,12 @@ extension CommandRunning {
 
 // MARK: runAsync
 
-/// Output from the `runAsyncAndPrint` commands.
+/*
+ 4 个命令执行接口中的 runAsync 和 runAsyncAndPrint 提供。（run/runAsync/runAndPrint/runAsyncAndPrint）
+
+ 在异步场景下，需要返回业务方异步对象，以对命令执行状态、执行结果等进行访问和监听。
+ 当前文件没有什么特别的实现，主要是对 process 子进程进行信息透传。
+ */
 public class PrintedAsyncCommand {
 	fileprivate let process: Process
 
@@ -258,72 +267,39 @@ public class PrintedAsyncCommand {
 			exit(errormessage: error, file: file, line: line)
 		}
 	}
-
-	/// Is the command still running?
+  
 	public var isRunning: Bool { process.isRunning }
-
-	/// Terminates the command by sending the SIGTERM signal.
 	public func stop() {
 		process.terminate()
 	}
-
-	/// Interrupts the command by sending the SIGINT signal.
 	public func interrupt() {
 		process.interrupt()
 	}
-
-	/**
-	 Temporarily suspends a command. Call resume() to resume a suspended command.
-
-	 - warning: You may suspend a command multiple times, but it must be resumed an equal number of times before the command will truly be resumed.
-	 - returns: `true` iff the command was successfully suspended.
-	 */
 	@discardableResult public func suspend() -> Bool {
 		process.suspend()
 	}
-
-	/**
-	 Resumes a command previously suspended with suspend().
-
-	 - warning: If the command has been suspended multiple times then it will have to be resumed the same number of times before execution will truly be resumed.
-	 - returns: true if the command was successfully resumed.
-	 */
 	@discardableResult public func resume() -> Bool {
 		process.resume()
 	}
 
-	/**
-	 Waits for this command to finish.
-
-	 - warning: Hangs if the unread output of either standard output or standard error is larger than 64KB ([#52](https://github.com/kareman/SwiftShell/issues/52)). To work around this problem, read all the output first, even if you're not going to use it.
-	 - returns: self
-	 - throws:  `CommandError.returnedErrorCode(command: String, errorcode: Int)` if the exit code is anything but 0.
-	 */
 	@discardableResult public func finish() throws -> Self {
 		try process.finish()
 		return self
 	}
 
-	/** Waits for command to finish, then returns with exit code. */
 	public func exitcode() -> Int {
 		process.waitUntilExit()
 		return Int(process.terminationStatus)
 	}
 
-	/**
-	 Waits for the command to finish, then returns why the command terminated.
-
-	 - returns: `.exited` if the command exited normally, otherwise `.uncaughtSignal`.
-	 */
 	public func terminationReason() -> Process.TerminationReason {
 		process.waitUntilExit()
 		return process.terminationReason
 	}
 
-	/// Takes a closure to be called when the command has finished.
-	///
-	/// - Parameter handler: A closure taking this AsyncCommand as input, returning nothing.
-	/// - Returns: This PrintedAsyncCommand.
+  /*
+   命令执行完毕后，及时通知业务方，通知参数为本身。业务通过参数对命令执行结果和异常进行读取。
+   */
 	@discardableResult public func onCompletion(_ handler: @escaping (PrintedAsyncCommand) -> Void) -> Self {
 		process.terminationHandler = { _ in
 			handler(self)
@@ -332,11 +308,20 @@ public class PrintedAsyncCommand {
 	}
 }
 
-/** Output from the 'runAsync' commands. */
+/*
+ 4 个命令执行接口中的 run 和 runAsync 使用。（run/runAsync/runAndPrint/runAsyncAndPrint）
+
+ 相比 `runAsyncAndPrint`，`run`、`runAsync` 不需要打印，就需要改写 Process 的输出 filehandle 并在命令执行完成后进行输出读取。
+ */
 public final class AsyncCommand: PrintedAsyncCommand {
 	public let stdout: ReadableStream
 	public let stderror: ReadableStream
 
+  /*
+   因为不在走 main/custom 上下文的输出（大概率是显示器输出），所以这里需要自定义提供可写的 filehandle，并且在命令执行完毕后，通过可读的 filehandle 来读取内容。
+   
+   Pipe 管道可以实现这一点。把 pipe 对象给到 process，process 会主动调用可写的 filehandle 进行写入，然后外部可以通过 可读的 filehandle 进行读取。
+   */
 	override init(unlaunched process: Process, combineOutput: Bool) {
 		let outpipe = Pipe()
 		process.standardOutput = outpipe
@@ -353,10 +338,6 @@ public final class AsyncCommand: PrintedAsyncCommand {
 		super.init(unlaunched: process, combineOutput: combineOutput)
 	}
 
-	/// Takes a closure to be called when the command has finished.
-	///
-	/// - Parameter handler: A closure taking this AsyncCommand as input, returning nothing.
-	/// - Returns: This AsyncCommand.
 	@discardableResult public override func onCompletion(_ handler: @escaping (AsyncCommand) -> Void) -> Self {
 		process.terminationHandler = { _ in
 			handler(self)
@@ -366,26 +347,23 @@ public final class AsyncCommand: PrintedAsyncCommand {
 }
 
 extension CommandRunning {
-	/**
-	 Runs executable and returns before it is finished.
-
-	 - warning:              Application will be terminated if ‘executable’ could not be launched.
-	 - parameter executable: Path to an executable file. If not then exit.
-	 - parameter args:       Arguments to the executable.
-	 */
+  /*
+   4 个命令执行接口中的 runAsync。（run/runAsync/runAndPrint/runAsyncAndPrint）
+   
+   1. 不需要打印。不能使用 main 默认上下文(默认屏幕输出)。
+   2. 异步，返回异步对象。调用者通过异步对象对命令执行状态、执行结果等进行访问和监听。
+   */
 	public func runAsync(_ executable: String, _ args: Any ..., file: String = #file, line: Int = #line) -> AsyncCommand {
 		let stringargs = args.flatten().map(String.init(describing:))
 		return AsyncCommand(launch: createProcess(executable, args: stringargs), file: file, line: line)
 	}
 
-	/**
-	 Runs executable and returns before it is finished.
-	 Any output is printed to standard output and standard error, respectively.
-
-	 - warning:              Application will be terminated if ‘executable’ could not be launched.
-	 - parameter executable: Path to an executable file. If not then exit.
-	 - parameter args:       Arguments to the executable.
-	 */
+  /*
+   4 个命令执行接口中的 runAsyncAndPrint。（run/runAsync/runAndPrint/runAsyncAndPrint）
+   
+   1. 打印。这是 Process 使用 main 上下文场景下的默认实现。
+   2. 异步，返回异步对象。调用者通过异步对象对命令执行状态、执行结果等进行访问和监听。
+   */
 	public func runAsyncAndPrint(_ executable: String, _ args: Any ..., file: String = #file, line: Int = #line) -> PrintedAsyncCommand {
 		let stringargs = args.flatten().map(String.init(describing:))
 		return PrintedAsyncCommand(launch: createProcess(executable, args: stringargs), file: file, line: line)
@@ -395,17 +373,13 @@ extension CommandRunning {
 // MARK: runAndPrint
 
 extension CommandRunning {
-	/**
-	 Runs executable and prints output and errors.
-
-	 - parameter executable: path to an executable file.
-	 - parameter args:       arguments to the executable.
-	 - throws:
-	 `CommandError.returnedErrorCode(command: String, errorcode: Int)` if the exit code is anything but 0.
-
-	 `CommandError.inAccessibleExecutable(path: String)` if 'executable’ turned out to be not so executable after all.
-	 */
-	public func runAndPrint(_ executable: String, _ args: Any ...) throws {
+  /*
+   4 个命令执行接口中的 runAndPrint。（run/runAsync/runAndPrint/runAsyncAndPrint）
+   
+   1. 打印。这是 Process 使用 main 上下文场景下的默认实现。
+   2. 非异步，和 run 的区别是因为已经打印了，所以不需要调用者拿到命令输出信息。默认即可，不需要做处理。
+   */
+  public func runAndPrint(_ executable: String, _ args: Any ...) throws {
 		let stringargs = args.flatten().map(String.init(describing:))
 		let process = createProcess(executable, args: stringargs)
 
@@ -415,53 +389,22 @@ extension CommandRunning {
 }
 
 // MARK: Global functions
-
-/// Runs a command.
-///
-/// - parameter executable: path to an executable, or the name of an executable in PATH.
-/// - parameter args: the arguments, one string for each.
-/// - parameter combineOutput: if true then stdout and stderror go to the same stream. Default is false.
+/*
+ 4 个命令执行接口的语法糖，不再介绍。run/runAsync/runAndPrint/runAsyncAndPrint
+ */
 @discardableResult public func run(_ executable: String, _ args: Any ..., combineOutput: Bool = false) -> RunOutput {
 	main.run(executable, args, combineOutput: combineOutput)
 }
-
 @available(*, unavailable, message: "Use `run(...).stdout` instead.")
 @discardableResult public func run(_ executable: String, _ args: Any ..., combineOutput: Bool = false) -> String {
 	fatalError()
 }
-
-/**
- Runs executable and returns before it is finished.
-
- - warning:              Application will be terminated if ‘executable’ could not be launched.
- - parameter executable: Path to an executable file. If not then exit.
- - parameter args:       Arguments to the executable.
- */
 public func runAsync(_ executable: String, _ args: Any ..., file: String = #file, line: Int = #line) -> AsyncCommand {
 	main.runAsync(executable, args, file: file, line: line)
 }
-
-/**
- Runs executable and returns before it is finished.
- Any output is printed to standard output and standard error, respectively.
-
- - warning:              Application will be terminated if ‘executable’ could not be launched.
- - parameter executable: Path to an executable file. If not then exit.
- - parameter args:       Arguments to the executable.
- */
 public func runAsyncAndPrint(_ executable: String, _ args: Any ..., file: String = #file, line: Int = #line) -> PrintedAsyncCommand {
 	main.runAsyncAndPrint(executable, args, file: file, line: line)
 }
-
-/**
- Runs executable and prints output and errors.
-
- - parameter executable: path to an executable file.
- - parameter args: arguments to the executable.
- - throws: `CommandError.returnedErrorCode(command: String, errorcode: Int)` if the exit code is anything but 0.
-
- `CommandError.inAccessibleExecutable(path: String)` if 'executable’ turned out to be not so executable after all.
- */
 public func runAndPrint(_ executable: String, _ args: Any ...) throws {
 	try main.runAndPrint(executable, args)
 }

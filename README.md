@@ -1,3 +1,14 @@
+### SwiftShell 是一个非常棒的开源项目，用于 Swift 环境下方便快捷的执行终端命令。  
+SwiftShell is a great open source project for convenient and fast execution of terminal commands in the Swift environment.
+
+### 当前项目 fork 了原作者仓库并做了源码解读【中文】。详细可参考 [SwiftShell 高效的命令行工具](https://www.yigegongjiang.com/2023/SwiftSystemShell/)  
+The current project fork the original author's warehouse and made the source code interpretation [Chinese]. For details, please refer to [SwiftShell Efficient Command Line Tool](https://www.yigegongjiang.com/2023/SwiftSystemShell/)
+
+### 感谢原作者提供了如此优秀的开源项目。  
+Thanks to the original author for providing such an excellent open source project.
+
+---
+
 Run shell commands | [Parse command line arguments](https://github.com/kareman/Moderator) | [Handle files and directories](https://github.com/kareman/FileSmith)
 
 ---

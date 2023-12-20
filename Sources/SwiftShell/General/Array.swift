@@ -5,6 +5,14 @@
  *
  */
 
+/*
+ 将超过一维的数组拍平。
+ 这里使用的 flatMap 已经废弃，目前使用 `compactMap`。
+ flatMap 相比 Map 而言，内部默认是 join 追加。
+ compactMap 相比 flatMap，增加了非空的过滤。
+ 
+ 作者这里支持命令传参的时候，以多维拍平为一维进行解析。
+ */
 extension Array where Element: Any {
 	func flatten() -> [Any] {
 		self.flatMap { x -> [Any] in

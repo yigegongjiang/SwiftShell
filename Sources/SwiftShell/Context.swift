@@ -5,9 +5,23 @@
  *
  */
 
+/*
+ Context 上下文是命令执行的基础。
+ 因为命令需要提供两个核心的参数，即输入和输出 filehandle。正常而言，我们只需要在执行命令的时候，及时补充这两个 filehandle 即可。
+ 
+ 当需要执行命令的场景复杂之后，如 file/String/NSData 等各类对象均可以巧妙的调用命令接口，这时候就需要对 filehandle 进行统一管理或者定义一套标准。
+ 这样，在使用命令场景的时候，内部无需做任何改动，只需要外部使用者，在各自场景下提供对应的 filehandle。
+ 
+ 比如，当需要对 String 字符串直接执行命令的时候，外部需要扩展 String 的实现，以将 String 的内容写入到一个 filehandle 里面并提供给 Process 子进程。
+ 当然，对于 String 的实现，作者已经写好，相见 `String.swift` 文件源码。类似的还有 `Files.swift` 文件源码。
+ 
+ 以下内容不在做更多解读，本质就是约定了不同场景下命令执行的环境信息约定，供不同场景进行自定义。其中 main 是默认场景，即标准输入(键盘)和输出(显示器)。
+ */
+
 import Foundation
 
 public protocol Context: CustomDebugStringConvertible {
+  // 这里用于将父进程的环境变量信息，携带到子进程供其使用。具体可参考：[Shell 和进程](https://www.yigegongjiang.com/2022/Shell%E5%92%8C%E8%BF%9B%E7%A8%8B/#0x03-Shell-%E5%92%8C-SubShell)
 	var env: [String: String] { get set }
 	var stdin: ReadableStream { get set }
 	var stdout: WritableStream { get set }
